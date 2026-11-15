@@ -29,11 +29,13 @@ class LateMark:
     version: int
     ts: datetime
     running_max_ts: datetime
+    source: str = ""
 
     def to_dict(self) -> dict:
         return {
             "table": self.table,
             "line_no": self.line_no,
+            "source": self.source,
             "pk": self.pk,
             "version": self.version,
             "ts": _fmt(self.ts),
@@ -56,6 +58,7 @@ def detect_late(events: list[Event]) -> list[LateMark]:
                     version=event.version,
                     ts=event.ts,
                     running_max_ts=max_ts,
+                    source=event.source,
                 )
             )
         if max_ts is None or event.ts > max_ts:

@@ -10,7 +10,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SAMPLE_DIR = BASE_DIR / "sample_data"
 EVENTS_DIR = SAMPLE_DIR / "events"
 SCHEMAS_DIR = SAMPLE_DIR / "schemas"
+REPLAY_DIR = SAMPLE_DIR / "replay"
 DATA_DIR = Path(os.environ.get("CDCWATER_DATA_DIR", str(BASE_DIR / "data")))
+UPLOAD_DIR = DATA_DIR / "uploads"
 SEED_VERSION = "seed-2026-11-10.1"
 
 TABLES = [
@@ -35,6 +37,7 @@ TABLES = [
 ]
 TABLE_NAMES = [item["name"] for item in TABLES]
 TABLE_LABELS = {item["name"]: item["label"] for item in TABLES}
+TABLE_BY_FILE = {item["file"]: item["name"] for item in TABLES}
 
 OP_LABELS = {"c": "新增 c", "u": "更新 u", "d": "删除 d"}
 

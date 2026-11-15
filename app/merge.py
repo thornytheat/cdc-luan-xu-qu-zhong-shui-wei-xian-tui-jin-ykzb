@@ -150,6 +150,8 @@ def merge_table(table: str, events: list[Event], late_lines: set[int] | None = N
             "seq": seq,
             "table": table,
             "line_no": event.line_no,
+            "source": event.source,
+            "fingerprint": event.fingerprint,
             "pk": event.pk,
             "version": event.version,
             "op": event.op,

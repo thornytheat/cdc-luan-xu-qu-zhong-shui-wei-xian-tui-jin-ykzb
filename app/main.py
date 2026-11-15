@@ -1,19 +1,22 @@
 """FastAPI 路由（薄）：页面渲染 + JSON 端点，业务全部在领域模块里。
 
-页面：/ 首页 · /workbench 工作台 · /result/{run_id} 结果 · /review 复核与导出
+页面：/ 首页 · /workbench 工作台 · /result/{run_id} 结果 · /review 复核 · /replay 整包重放
 接口：POST /api/merge · GET /api/runs · GET /api/runs/{id} · GET /api/runs/{id}/snapshot
+      POST /api/replay · POST /api/replay/upload · GET /api/replays · GET /api/replays/{id}
+      POST /api/quarantine/{id}/resolve · GET /api/publication · GET /api/publication/snapshot
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from . import archive, runner, schema_gate, settings, snapshot, store
+from . import archive, replay, runner, schema_gate, settings, snapshot, store
 from .archive import EventError
 
 BASE_DIR = settings.BASE_DIR
@@ -39,6 +42,15 @@ class MergeRequest(BaseModel):
     schema_version: int = Field(2, ge=1, le=2, description="要评估的目标 schema 版本")
 
 
+class ReplayRequest(BaseModel):
+    package: str = Field("replay", description="重放包名（目前内置 replay）")
+    schema_version: int = Field(2, ge=1, le=2, description="候选结果评估的目标 schema 版本")
+
+
+class ResolveRequest(BaseModel):
+    decision: str = Field(..., description="keep_archived 保留归档 / use_incoming 采用到来")
+
+
 def render(request: Request, template: str, **ctx) -> HTMLResponse:
     context = {
         "app_name": settings.APP_NAME,
@@ -48,6 +60,8 @@ def render(request: Request, template: str, **ctx) -> HTMLResponse:
         "verdict_labels": settings.VERDICT_LABELS,
         "change_labels": settings.CHANGE_LABELS,
         "op_labels": settings.OP_LABELS,
+        "replay_status_labels": replay.STATUS_LABELS,
+        "quarantine_status_labels": replay.QUARANTINE_STATUS_LABELS,
         "nav": ctx.pop("nav", ""),
     }
     context.update(ctx)
@@ -67,12 +81,16 @@ def with_conn():
 def health():
     conn = with_conn()
     try:
+        live = store.live_publication(conn)
         return {
             "status": "ok",
             "app": settings.APP_SHORT,
             "events": store.total_events(conn),
             "runs": store.run_count(conn),
             "seed_version": store.get_meta(conn, "seed_version"),
+            "replay_runs": store.replay_run_count(conn),
+            "pending_quarantine": store.count_quarantine(conn, status="pending"),
+            "live_publication": live["publication_id"] if live else None,
         }
     finally:
         conn.close()
@@ -225,6 +243,44 @@ def review(request: Request, run_id: str | None = None, kind: str = Query(defaul
     )
 
 
+@app.get("/replay", response_class=HTMLResponse)
+def replay_page(request: Request, replay_id: str | None = None):
+    conn = with_conn()
+    try:
+        runs = store.list_replay_runs(conn, limit=20)
+        selected = None
+        if replay_id:
+            selected = store.get_replay_run(conn, replay_id)
+        if selected is None and runs:
+            selected = store.get_replay_run(conn, runs[0]["replay_id"])
+        live = store.live_publication(conn)
+        pending = store.list_quarantine(conn, status="pending")
+        quarantine = store.list_quarantine(conn, limit=50)
+        publications = store.list_publications(conn, limit=5)
+        stats = {
+            "events": store.total_events(conn),
+            "replay_runs": store.replay_run_count(conn),
+            "pending_quarantine": store.count_quarantine(conn, status="pending"),
+            "publications": store.publication_count(conn),
+        }
+    finally:
+        conn.close()
+    return render(
+        request,
+        "replay.html",
+        page="replay",
+        nav="replay",
+        runs=runs,
+        selected=selected,
+        live=live,
+        pending=pending,
+        quarantine=quarantine,
+        publications=publications,
+        stats=stats,
+        replay_package_exists=settings.REPLAY_DIR.exists(),
+    )
+
+
 # --- API -------------------------------------------------------------------
 
 
@@ -366,3 +422,209 @@ def api_schema(version: int):
     if version not in (1, 2):
         raise HTTPException(status_code=400, detail="schema 版本只支持 1 或 2")
     return schema_gate.load_schema(settings.SCHEMAS_DIR / f"v{version}.json")
+
+
+# --- 整包重放与原子发布 ------------------------------------------------------
+
+
+def replay_response(run: dict) -> JSONResponse:
+    files = {
+        f["source"]: {
+            "lines": f["lines"],
+            "archived_new": f["archived_new"],
+            "duplicates": f["duplicates"],
+            "quarantined": f["quarantined"],
+            "skipped_resolved": f["skipped_resolved"],
+        }
+        for f in run["files"]
+    }
+    return JSONResponse(
+        {
+            "replay_id": run["replay_id"],
+            "status": run["status"],
+            "status_label": replay.STATUS_LABELS.get(run["status"], run["status"]),
+            "package": run["package"],
+            "tables": run["tables"],
+            "files": files,
+            "checks_ok": run["checks"].get("ok") if run["checks"] else None,
+            "publication_id": run["publication_id"],
+            "error": run["error"],
+            "replay_url": f"/replay?replay_id={run['replay_id']}",
+        }
+    )
+
+
+@app.post("/api/replay")
+def api_replay(payload: ReplayRequest):
+    """整包重放内置样例包：归档 → 三重核对 → 原子替换（或保留旧版）。"""
+    if payload.package != "replay":
+        raise HTTPException(status_code=400, detail=f"未知的重放包：{payload.package}（可选 replay）")
+    conn = with_conn()
+    try:
+        files = replay.sample_package_files()
+        run = replay.execute_replay(conn, files, package="replay",
+                                    schema_version=payload.schema_version)
+    except replay.ReplayError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except EventError as exc:
+        raise HTTPException(status_code=422, detail=f"重放文件解析失败：{exc}") from exc
+    finally:
+        conn.close()
+    return replay_response(run)
+
+
+@app.post("/api/replay/upload")
+async def api_replay_upload(
+    file: UploadFile = File(...),
+    table: str = Form(""),
+    schema_version: int = Form(2),
+):
+    """上传单个 JSONL 事件文件重放；重传同一文件不会重复追加事件。"""
+    name = Path(file.filename or "").name
+    if not name.endswith(".jsonl"):
+        raise HTTPException(status_code=400, detail="只接受 .jsonl 事件文件")
+    table = table.strip() or settings.TABLE_BY_FILE.get(name, "")
+    if table not in settings.TABLE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无法识别文件 {name} 对应的表；请用 table 字段指定（可选 {', '.join(settings.TABLE_NAMES)}）",
+        )
+    content = await file.read()
+    if not content.strip():
+        raise HTTPException(status_code=422, detail="文件为空")
+    replay_id = replay.new_replay_id()
+    folder = settings.UPLOAD_DIR / replay_id
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(content)
+    conn = with_conn()
+    try:
+        run = replay.execute_replay(
+            conn, [(path, table)], package=f"upload:{name}",
+            schema_version=schema_version, replay_id=replay_id,
+        )
+    except replay.ReplayError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except EventError as exc:
+        raise HTTPException(status_code=422, detail=f"上传文件解析失败：{exc}") from exc
+    finally:
+        conn.close()
+    return replay_response(run)
+
+
+@app.get("/api/replays")
+def api_replays(limit: int = Query(default=20, ge=1, le=100)):
+    conn = with_conn()
+    try:
+        runs = store.list_replay_runs(conn, limit=limit)
+    finally:
+        conn.close()
+    return {
+        "runs": [
+            {
+                "replay_id": run["replay_id"],
+                "created_at": run["created_at"],
+                "status": run["status"],
+                "status_label": replay.STATUS_LABELS.get(run["status"], run["status"]),
+                "package": run["package"],
+                "tables": run["tables"],
+                "publication_id": run["publication_id"],
+            }
+            for run in runs
+        ],
+        "count": len(runs),
+    }
+
+
+@app.get("/api/replays/{replay_id}")
+def api_replay_detail(replay_id: str):
+    conn = with_conn()
+    try:
+        run = store.get_replay_run(conn, replay_id)
+    finally:
+        conn.close()
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"重放运行不存在：{replay_id}")
+    return run
+
+
+@app.get("/api/quarantine")
+def api_quarantine(status: str = Query(default=""), table: str = Query(default="")):
+    conn = with_conn()
+    try:
+        records = store.list_quarantine(
+            conn,
+            status=status or None,
+            tables=[table] if table else None,
+        )
+    finally:
+        conn.close()
+    return {"quarantine": records, "count": len(records)}
+
+
+@app.post("/api/quarantine/{quarantine_id}/resolve")
+def api_resolve_quarantine(quarantine_id: str, payload: ResolveRequest):
+    """裁决隔离事件；裁决后重跑同一重放包即可从已归档位置续跑并发布。"""
+    conn = with_conn()
+    try:
+        record = replay.resolve_quarantine(conn, quarantine_id, payload.decision)
+    except replay.ReplayError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except store.StoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        conn.close()
+    return {
+        "quarantine": record,
+        "hint": "重新执行同一重放包即可从已归档位置续跑（已归档事件不会重复追加）",
+    }
+
+
+@app.get("/api/publication")
+def api_publication():
+    conn = with_conn()
+    try:
+        live = store.live_publication(conn)
+        publications = store.list_publications(conn, limit=10)
+    finally:
+        conn.close()
+    return {
+        "live": None
+        if live is None
+        else {
+            "publication_id": live["publication_id"],
+            "created_at": live["created_at"],
+            "replay_id": live["replay_id"],
+            "tables": live["tables"],
+            "summary": live["summary"],
+        },
+        "history": [
+            {
+                "publication_id": pub["publication_id"],
+                "created_at": pub["created_at"],
+                "replay_id": pub["replay_id"],
+                "tables": pub["tables"],
+                "is_live": pub["is_live"],
+                "summary": pub["summary"],
+            }
+            for pub in publications
+        ],
+    }
+
+
+@app.get("/api/publication/snapshot")
+def api_publication_snapshot():
+    conn = with_conn()
+    try:
+        live = store.live_publication(conn)
+    finally:
+        conn.close()
+    if live is None:
+        raise HTTPException(status_code=404, detail="现网还没有已发布的快照")
+    payload = snapshot.dumps(live["snapshot"])
+    filename = f"cdcwater-live-{live['publication_id']}.json"
+    return Response(
+        content=payload,
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

@@ -1,0 +1,415 @@
+{% extends "base.html" %}
+{% block title %}整包重放 · {{ app_short }}{% endblock %}
+{% block crumb %}整包重放{% endblock %}
+{% block meta %}
+{% if live %}<span class="dot ok"></span>现网 <code>{{ live.publication_id }}</code>{% else %}<span class="dot warn"></span>现网尚未发布{% endif %}
+· 待裁决隔离 {{ stats.pending_quarantine }} 条
+{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/workbench">事件工作台</a>
+<a class="btn secondary small" href="/review">复核与导出</a>
+{% endblock %}
+{% block status_left %}按来源+内容指纹去重 · 同版本不同内容隔离 · 三重核对后原子替换现网 · 失败保留旧版续跑{% endblock %}
+{% block status_right %}{% if selected %}重放 <code>{{ selected.replay_id }}</code>{% else %}{{ app_short }}{% endif %}{% endblock %}
+
+{% block content %}
+{% set status_tag = {'published': 'ok', 'unchanged': 'ok', 'blocked': 'warn', 'failed': 'err', 'staged': 'warn'} %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">整包重放与原子发布</h1>
+    <p class="page-sub">源库压缩历史后行号整体前移：旧口径按「文件名 + 行号」去重会把新订单当旧行丢掉、快照照样发布。
+      本页改为按「来源 + 内容指纹」识别重复 —— 同一文件重放不新增记录，重排后的真实变更不会被误判；
+      同来源同版本不同内容的事件隔离待裁决；来源 / 归档 / 候选三重核对一致且隔离清零后，才原子替换现网。</p>
+  </div>
+</div>
+
+<div class="split">
+  <section class="panel pane-sticky">
+    <div class="panel-head">
+      <h2>重放任务</h2>
+      <div class="panel-actions"><span class="tag">模块 7 · 整包重放</span></div>
+    </div>
+    <div class="panel-body">
+      <form id="replay-form">
+        <div class="field">
+          <label>1. 选择重放包</label>
+          <div class="check-list">
+            <label class="check-item">
+              <input type="radio" name="package" value="replay" checked>
+              <span><strong>样例重放包（源库压缩后整包重放）</strong>
+                <div class="small muted">3 个文件：行号整体前移；orders 含 3 条新订单事件 +
+                  1 条同版本不同内容修正；inventory 含 1 条新事件；customers 纯重排。</div></span>
+            </label>
+          </div>
+        </div>
+        <div class="field">
+          <label>2. 候选结果的目标 schema 版本</label>
+          <div class="check-list">
+            <label class="check-item">
+              <input type="radio" name="schema_version" value="2" checked>
+              <span><strong>v2（变更申请）</strong></span>
+            </label>
+            <label class="check-item">
+              <input type="radio" name="schema_version" value="1">
+              <span><strong>v1（基线自身）</strong></span>
+            </label>
+          </div>
+        </div>
+        <div class="alert alert-error" id="replay-error" role="alert" hidden></div>
+      </form>
+    </div>
+    <div class="panel-actions">
+      <button type="submit" id="replay-btn" form="replay-form" {% if not replay_package_exists %}disabled{% endif %}>执行重放</button>
+      <span class="small muted" style="align-self:center">重跑同一文件不会重复追加事件</span>
+    </div>
+
+    <div class="panel-body" style="border-top:1px solid var(--line)">
+      <form id="upload-form" enctype="multipart/form-data">
+        <div class="field">
+          <label>或上传单个 JSONL 文件重放</label>
+          <input type="file" name="file" accept=".jsonl" required>
+          <div class="check-list" style="margin-top:6px">
+            {% for item in tables_meta %}
+            <label class="check-item">
+              <input type="radio" name="table" value="{{ item.name }}" {% if loop.first %}checked{% endif %}>
+              <span><strong>{{ item.label }}</strong> <span class="muted small">· 按文件名可自动识别</span></span>
+            </label>
+            {% endfor %}
+          </div>
+          <p class="small muted" style="margin:6px 0 0">文件名与归档来源一致（如 orders.jsonl）即视为同一来源重放。</p>
+        </div>
+        <div class="alert alert-error" id="upload-error" role="alert" hidden></div>
+      </form>
+    </div>
+    <div class="panel-actions">
+      <button type="submit" id="upload-btn" form="upload-form">上传并重放</button>
+    </div>
+
+    <div class="panel-body" style="border-top:1px solid var(--line)">
+      <details class="help">
+        <summary>重放口径（去重 / 隔离 / 核对 / 替换）</summary>
+        <ul class="list small" style="margin-bottom:0">
+          <li><strong>重复识别</strong>：按「来源 + 内容指纹」（表/键/版本/op/时间/内容的 sha256），与行号无关；
+            同一文件重放全部判重复，行号重排的真实变更不会被误判，新指纹事件才归档。</li>
+          <li><strong>隔离</strong>：同来源、同 (表, 键, 版本) 但内容不同 → 隔离待裁决，不进归档、不进候选。</li>
+          <li><strong>三重核对</strong>：来源（每行有去向、文件未被改动）、归档（非隔离事件逐条在库）、
+            候选（覆盖归档全部事件、新事件全部进入候选），外加隔离清零。</li>
+          <li><strong>原子替换</strong>：核对全过后在一个事务里作废旧现网、写入新现网；
+            任何失败都保留旧版，重跑同一文件即从已归档位置续跑。</li>
+        </ul>
+      </details>
+    </div>
+  </section>
+
+  <div>
+    <div class="kpi-strip">
+      <div class="kpi {% if not live %}warn{% endif %}">
+        <div class="k-label">当前现网</div>
+        <div class="k-value" style="font-size:13px;font-family:var(--font-mono);letter-spacing:0">
+          {{ live.publication_id if live else '未发布' }}</div>
+        <div class="k-note">{% if live %}{{ live.created_at }} · {{ live.summary.alive_rows }} 行{% else %}首次核对通过才会发布{% endif %}</div>
+      </div>
+      <div class="kpi {% if stats.pending_quarantine %}err{% endif %}">
+        <div class="k-label">待裁决隔离</div>
+        <div class="k-value">{{ stats.pending_quarantine }}</div>
+        <div class="k-note">未清零前不替换现网</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">归档事件</div>
+        <div class="k-value">{{ stats.events }}</div>
+        <div class="k-note">重放只追加真实新事件</div>
+      </div>
+      <div class="kpi {% if selected and selected.status in ('blocked', 'failed') %}warn{% endif %}">
+        <div class="k-label">当前选中重放</div>
+        <div class="k-value" style="font-size:13px">{{ replay_status_labels.get(selected.status, '—') if selected else '—' }}</div>
+        <div class="k-note">{{ selected.replay_id if selected else '尚未重放过' }}</div>
+      </div>
+    </div>
+
+    {% if selected %}
+    {% set checks = selected.checks %}
+    <section class="panel" id="selected">
+      <div class="panel-head">
+        <h2>重放结果 · <span class="mono">{{ selected.replay_id }}</span></h2>
+        <div class="panel-actions">
+          <span class="tag">{{ selected.package }}</span>
+          <span class="tag {{ status_tag.get(selected.status, 'warn') }}">{{ replay_status_labels.get(selected.status, selected.status) }}</span>
+        </div>
+      </div>
+      <div class="panel-body tight">
+        {% if selected.status == 'published' %}
+        <div class="alert alert-ok">来源 / 归档 / 候选三重核对一致，已在一个事务里原子替换现网 →
+          <strong class="mono">{{ selected.publication_id }}</strong>。替换前后对照见下方「替换前后」。</div>
+        {% elif selected.status == 'unchanged' %}
+        <div class="alert alert-info">候选结果与现网逐表一致，未做无意义替换（重试同一文件的幂等保证）。</div>
+        {% elif selected.status == 'blocked' %}
+        <div class="alert alert-warn">核对未通过，<strong>已保留旧版现网</strong>；新归档事件已留在库中，
+          处理下方待裁决隔离后重跑同一文件即可从已归档位置续跑（不会重复追加）。</div>
+        {% elif selected.status == 'failed' %}
+        <div class="alert alert-error">执行失败，已保留旧版现网：{{ selected.error }}。
+          重跑同一文件即从已归档位置续跑。</div>
+        {% endif %}
+
+        {% if checks %}
+        <table class="dense">
+          <thead><tr><th style="width:120px">核对项</th><th style="width:64px">结论</th><th>口径与明细</th></tr></thead>
+          <tbody>
+            {% for key in ['source', 'archive', 'candidate', 'quarantine'] %}
+            {% set item = checks.get(key) %}
+            {% if item %}
+            <tr>
+              <td><strong>{{ item.title }}</strong></td>
+              <td><span class="tag {{ 'ok' if item.ok else 'err' }}">{{ '通过' if item.ok else '未过' }}</span></td>
+              <td class="small">
+                {{ item.detail }}
+                {% if key == 'source' %}
+                  {% for f in item.files %}
+                    <div class="muted mono">{{ f.source }}：{{ f.accounted }}/{{ f.lines }} 行有去向
+                      {% if not f.hash_ok %}· <span class="tag err">文件归档期间被改动</span>{% endif %}</div>
+                  {% endfor %}
+                {% elif key == 'archive' %}
+                  <div class="muted">逐条核对 {{ item.checked }} 个归档键
+                    {% if item.missing %}· 缺失：{{ item.missing|join('、') }}{% endif %}
+                    {% if item.count_mismatch %}· 计数不符：{{ item.count_mismatch|length }} 个来源{% endif %}</div>
+                {% elif key == 'candidate' %}
+                  {% for t in item.tables %}
+                    <div class="muted mono">{{ t.table }}：候选覆盖 {{ t.changelog }}/{{ t.archived }} 条归档事件</div>
+                  {% endfor %}
+                  {% if item.missing_new %}<div class="tag err">新事件未进候选：{{ item.missing_new|join('、') }}</div>{% endif %}
+                {% elif key == 'quarantine' and item.pending %}
+                  <div class="muted">待裁决：{{ item.pending_keys|join('、') }}</div>
+                {% endif %}
+              </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>逐文件归档明细与被跳过原因</h2>
+        <div class="panel-actions"><span class="tag">新归档 / 重复 / 隔离 / 已裁决跳过</span></div>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead>
+            <tr><th>文件（来源）</th><th class="num">行数</th><th class="num">新归档</th>
+              <th class="num">判重复</th><th class="num">隔离</th><th class="num">已裁决跳过</th>
+              <th>sha256</th><th class="num">归档前→后</th></tr>
+          </thead>
+          <tbody>
+            {% for f in selected.files %}
+            <tr>
+              <td class="nowrap"><strong class="mono">{{ f.source }}</strong>
+                <div class="small muted">{{ f.table }}</div></td>
+              <td class="num">{{ f.lines }}</td>
+              <td class="num">{{ f.archived_new }}</td>
+              <td class="num">{{ f.duplicates }}</td>
+              <td class="num {% if f.quarantined %}warn{% endif %}">{{ f.quarantined }}</td>
+              <td class="num">{{ f.skipped_resolved }}</td>
+              <td class="small mono muted">{{ f.sha256[:12] }}…</td>
+              <td class="num small muted">{{ f.pre_count }} → {{ f.post_count }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% for f in selected.files %}
+      {% if f.new_keys or f.skipped %}
+      <div class="panel-body tight" style="border-top:1px solid var(--line)">
+        {% if f.new_keys %}
+        <p class="small" style="margin:0 0 4px"><strong>{{ f.source }}</strong> 新归档事件：
+          {% for k in f.new_keys %}<span class="tag ok">{{ k.pk }} v{{ k.version }}（第 {{ k.line_no }} 行）</span>{% endfor %}
+        </p>
+        {% endif %}
+        {% if f.skipped %}
+        <p class="small muted" style="margin:4px 0 4px">{{ f.source }} 被跳过事件逐条原因（前 {{ f.skipped|length }} 条）：</p>
+        <table class="dense">
+          <thead><tr><th style="width:90px">到来行号</th><th>键</th><th class="num">版本</th><th>被跳过原因</th></tr></thead>
+          <tbody>
+            {% for s in f.skipped %}
+            <tr>
+              <td class="mono">第 {{ s.line_no }} 行</td>
+              <td class="mono">{{ s.pk }}</td>
+              <td class="num">{{ s.version }}</td>
+              <td class="small">{{ s.reason }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% endfor %}
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>隔离事件（同来源同版本不同内容）</h2>
+        <div class="panel-actions"><span class="tag err">{{ stats.pending_quarantine }} 条待裁决</span></div>
+      </div>
+      {% if quarantine %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead>
+            <tr><th>键 / 版本</th><th>差异</th><th>归档内容（第几行 / 批次）</th><th>到来内容（第几行）</th>
+              <th>状态</th><th>裁决</th></tr>
+          </thead>
+          <tbody>
+            {% for q in quarantine %}
+            <tr>
+              <td class="nowrap"><strong class="mono">{{ q.pk }}</strong> <span class="mono">v{{ q.version }}</span>
+                <div class="small muted mono">{{ q.table_name }} · {{ q.source }}</div></td>
+              <td class="small">
+                {% if q.diff %}字段 {% for d in q.diff %}<span class="tag warn">{{ d }}</span>{% endfor %}
+                {% else %}after 一致{% endif %}
+                {% if q.op_changed %}<div class="small muted">op 不同：{{ q.archived.op }} → {{ q.incoming.op }}</div>{% endif %}
+                {% if q.ts_changed %}<div class="small muted">ts 不同：{{ q.archived.ts }} → {{ q.incoming.ts }}</div>{% endif %}
+              </td>
+              <td class="small mono">第 {{ q.archived.line_no }} 行 · {{ q.archived.batch[:16] }}<br>{{ q.archived.after|tojson }}</td>
+              <td class="small mono">第 {{ q.incoming.line_no }} 行<br>{{ q.incoming.after|tojson }}</td>
+              <td><span class="tag {{ 'err' if q.status == 'pending' else 'ok' }}">{{ quarantine_status_labels.get(q.status, q.status) }}</span>
+                {% if q.resolved_at %}<div class="small muted">{{ q.resolved_at }}</div>{% endif %}</td>
+              <td class="nowrap">
+                {% if q.status == 'pending' %}
+                <button class="btn secondary small" data-resolve="{{ q.quarantine_id }}" data-decision="keep_archived">保留归档</button>
+                <button class="btn small" data-resolve="{{ q.quarantine_id }}" data-decision="use_incoming">采用到来</button>
+                {% else %}<span class="small muted">已裁决</span>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty"><strong>没有隔离事件</strong>同来源同版本不同内容的到来事件会隔离在这里等待裁决。</div>
+      {% endif %}
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>替换前后对照（现网 → 候选）</h2>
+        <div class="panel-actions"><span class="tag">{{ selected.replay_id }}</span></div>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead>
+            <tr><th>表</th><th class="num">行数 前→后</th><th class="num">墓碑 前→后</th>
+              <th>水位线 前→后</th><th>键级差异</th></tr>
+          </thead>
+          <tbody>
+            {% for table, d in selected.diff.items() %}
+            <tr>
+              <td class="nowrap"><strong>{{ d.label }}</strong><div class="small muted mono">{{ table }}</div></td>
+              <td class="num nowrap">{{ d.before.rows if d.before else '—' }} → {{ d.after.rows }}
+                {% if d.before and d.after.rows != d.before.rows %}
+                <span class="tag {{ 'ok' if d.after.rows > d.before.rows else 'warn' }}">{{ '%+d'|format(d.after.rows - d.before.rows) }}</span>
+                {% endif %}</td>
+              <td class="num nowrap">{{ d.before.tombstones if d.before else '—' }} → {{ d.after.tombstones }}</td>
+              <td class="small mono nowrap">{{ d.before.watermark if d.before else '—' }}<br>→ {{ d.after.watermark }}</td>
+              <td class="small">
+                {% if not d.before %}首次发布：全部 {{ d.after.rows }} 行均为新增
+                {% else %}
+                  {% if d.rows_added_count %}新增键 {{ d.rows_added|join('、') }}{% if d.rows_added_count > d.rows_added|length %} 等 {{ d.rows_added_count }} 个{% endif %}<br>{% endif %}
+                  {% if d.rows_removed_count %}移除键 {{ d.rows_removed|join('、') }}<br>{% endif %}
+                  {% if d.rows_changed_count %}内容变更 {% for c in d.rows_changed %}{{ c.pk }}(v{{ c.version_before }}→v{{ c.version_after }}){% if not loop.last %}、{% endif %}{% endfor %}<br>{% endif %}
+                  {% if d.tombstones_added_count %}新增墓碑 {{ d.tombstones_added|join('、') }}<br>{% endif %}
+                  {% if not (d.rows_added_count or d.rows_removed_count or d.rows_changed_count or d.tombstones_added_count) %}无键级差异{% endif %}
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% else %}
+    <div class="empty">
+      <strong>还没有重放记录</strong>
+      点左侧「执行重放」跑样例包，或上传一个 JSONL 文件；结果会展示三重核对、被跳过原因、隔离事件与替换前后对照。
+    </div>
+    {% endif %}
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>当前现网快照</h2>
+        <div class="panel-actions">
+          {% if live %}<a class="btn secondary small" href="/api/publication/snapshot">下载现网 JSON</a>{% endif %}
+        </div>
+      </div>
+      {% if live %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>表</th><th class="num">最终行</th><th class="num">墓碑</th><th>水位线</th><th class="num">未闭合键</th></tr></thead>
+          <tbody>
+            {% for table, payload in live.snapshot.tables.items() %}
+            <tr>
+              <td><strong>{{ payload.label }}</strong><div class="small muted mono">{{ table }}</div></td>
+              <td class="num">{{ payload.row_count }}</td>
+              <td class="num">{{ payload.tombstone_count }}</td>
+              <td class="small mono">{{ payload.watermark.watermark }}</td>
+              <td class="num">{{ payload.watermark.open_keys }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">现网 <code>{{ live.publication_id }}</code> · 由重放
+          <code>{{ live.replay_id }}</code> 发布于 {{ live.created_at }} · 全局水位线 {{ live.summary.watermark }}。
+          历史发布 {{ publications|length }} 次，只有核对一致的重放才会替换现网。</p>
+      </div>
+      {% else %}
+      <div class="empty"><strong>现网尚未发布</strong>第一次三重核对一致的重放会在这里发布现网快照；失败的重放只会保留旧版。</div>
+      {% endif %}
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>重放历史</h2>
+        <div class="panel-actions"><span class="tag">{{ stats.replay_runs }} 次</span></div>
+      </div>
+      {% if runs %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead>
+            <tr><th>重放</th><th>时间</th><th>包</th><th class="num">新归档</th><th class="num">判重复</th>
+              <th class="num">隔离</th><th>状态</th><th>现网</th></tr>
+          </thead>
+          <tbody>
+            {% for run in runs %}
+            {% set ns = namespace(new=0, dup=0, q=0) %}
+            {% for f in run.files %}
+              {% set ns.new = ns.new + f.archived_new %}
+              {% set ns.dup = ns.dup + f.duplicates %}
+              {% set ns.q = ns.q + f.quarantined %}
+            {% endfor %}
+            <tr>
+              <td class="nowrap"><a class="mono" href="/replay?replay_id={{ run.replay_id }}">{{ run.replay_id }}</a></td>
+              <td class="small muted nowrap">{{ run.created_at }}</td>
+              <td class="small">{{ run.package }}</td>
+              <td class="num">{{ ns.new }}</td>
+              <td class="num">{{ ns.dup }}</td>
+              <td class="num {% if ns.q %}warn{% endif %}">{{ ns.q }}</td>
+              <td><span class="tag {{ status_tag.get(run.status, 'warn') }}">{{ replay_status_labels.get(run.status, run.status) }}</span></td>
+              <td class="small mono">{{ run.publication_id or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty"><strong>暂无重放历史</strong></div>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>window.__replay = true;</script>
+{% endblock %}

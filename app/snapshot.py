@@ -33,9 +33,8 @@ def column_order(rows: list[dict]) -> list[str]:
     return order
 
 
-def build_snapshot(run: dict) -> dict:
-    """run 为 runner 产出的运行记录（含 result），这里只做结构化与精简。"""
-    result = run["result"]
+def shape_tables(result: dict) -> dict:
+    """把一次合并结果整形成快照的表结构（现网快照与候选结果共用同一形状）。"""
     tables: dict[str, dict] = {}
     for table, payload in result["tables"].items():
         rows = payload["rows"]
@@ -49,6 +48,13 @@ def build_snapshot(run: dict) -> dict:
             "counters": payload["counters"],
             "watermark": payload["watermark"],
         }
+    return tables
+
+
+def build_snapshot(run: dict) -> dict:
+    """run 为 runner 产出的运行记录（含 result），这里只做结构化与精简。"""
+    result = run["result"]
+    tables = shape_tables(result)
     return {
         "export": {
             "app": "cdcwater",

@@ -490,6 +490,10 @@ tr.sub td { background: #fafbfc; border-bottom: 1px dashed var(--line); }
 .alert-error { color: #8f1d14; background: var(--err-weak); border-color: #f6cfcb; border-left-color: var(--err); }
 .alert-error::before { content: "!"; font-weight: 800; }
 .alert-info { color: #1c3aa9; background: var(--accent-weak); border-color: #d3dcfb; border-left-color: var(--accent); }
+.alert-ok { color: #0d6b45; background: var(--ok-weak); border-color: #c9e8d8; border-left-color: var(--ok); }
+.alert-ok::before { content: "✓"; font-weight: 800; }
+.alert-warn { color: #8a5a00; background: var(--warn-weak); border-color: #f0dfc0; border-left-color: var(--warn); }
+.alert-warn::before { content: "⚠"; font-weight: 800; }
 
 .banner { border-left: 5px solid var(--line); }
 .banner.ok { border-left-color: var(--ok); background: #f6fbf8; }
@@ -682,6 +686,8 @@ ul.progress { height: auto; background: none; overflow: visible; }
 
 /* ---------- 项目自定义（沿用原有规则） ---------- */
 .num { text-align: right; font-variant-numeric: tabular-nums; }
+td.warn { color: var(--warn); font-weight: 700; }
+td.err { color: var(--err); font-weight: 700; }
 
 .metric-grid .metric { margin: 0; }
 

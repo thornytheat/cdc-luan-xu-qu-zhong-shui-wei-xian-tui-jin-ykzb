@@ -97,6 +97,76 @@
     applyFilter();
   }
 
+  // --- 整包重放页：执行重放 / 上传重放 / 隔离裁决 ---------------------------
+  var replayForm = qs('#replay-form');
+  if (replayForm) {
+    var replayBtn = qs('#replay-btn');
+    var replayErr = qs('#replay-error');
+    replayForm.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      replayErr.hidden = true;
+      var pkg = qs('input[name="package"]:checked', replayForm);
+      var sv = qs('input[name="schema_version"]:checked', replayForm);
+      replayBtn.disabled = true;
+      var label = replayBtn.textContent;
+      replayBtn.textContent = '重放中…';
+      try {
+        var data = await window.postJSON('/api/replay', {
+          package: pkg ? pkg.value : 'replay',
+          schema_version: sv ? Number(sv.value) : 2
+        });
+        window.location.href = data.replay_url;
+      } catch (err) {
+        window.showError(replayErr, err);
+        replayBtn.disabled = false;
+        replayBtn.textContent = label;
+      }
+    });
+  }
+
+  var uploadForm = qs('#upload-form');
+  if (uploadForm) {
+    var uploadBtn = qs('#upload-btn');
+    var uploadErr = qs('#upload-error');
+    uploadForm.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      uploadErr.hidden = true;
+      var formData = new FormData(uploadForm);
+      uploadBtn.disabled = true;
+      var label = uploadBtn.textContent;
+      uploadBtn.textContent = '上传中…';
+      try {
+        var res = await fetch('/api/replay/upload', { method: 'POST', body: formData });
+        var data = null;
+        try { data = await res.json(); } catch (e) { data = { detail: '响应不是 JSON' }; }
+        if (!res.ok) {
+          var msg = (data && data.detail) || ('请求失败：' + res.status);
+          throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+        }
+        window.location.href = data.replay_url;
+      } catch (err) {
+        window.showError(uploadErr, err);
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = label;
+      }
+    });
+  }
+
+  qsa('[data-resolve]').forEach(function (btn) {
+    btn.addEventListener('click', async function () {
+      var id = btn.getAttribute('data-resolve');
+      var decision = btn.getAttribute('data-decision');
+      btn.disabled = true;
+      try {
+        await window.postJSON('/api/quarantine/' + encodeURIComponent(id) + '/resolve', { decision: decision });
+        window.location.reload();
+      } catch (err) {
+        alert('裁决失败：' + (err && err.message ? err.message : String(err)));
+        btn.disabled = false;
+      }
+    });
+  });
+
   // --- 工作台：执行合并 + 进度 + 即时摘要 --------------------------------
   var form = qs('#merge-form');
   if (!form) return;

@@ -58,7 +58,27 @@
       <a class="btn small" href="/workbench">执行合并</a>
       {% if recent %}<a class="btn secondary small" href="/result/{{ recent[0].run_id }}">看最近一次结果</a>{% endif %}
       <a class="btn secondary small" href="/review">复核与导出</a>
+      <a class="btn secondary small" href="/replay">整包重放</a>
       <a class="btn secondary small" href="/workbench#m4">看水位线口径</a>
+    </p>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>整包重放与原子发布</h2>
+    <div class="panel-actions"><span class="tag">模块 7</span></div>
+  </div>
+  <div class="panel-body tight">
+    <p class="small" style="margin:0 0 6px">
+      源库压缩历史后行号整体前移：按「文件名 + 行号」去重会把新订单当旧行丢掉、快照照样发布。
+      重放流水线改为按「来源 + 内容指纹」识别重复 —— 同一文件重放不新增记录，重排的真实变更不误判；
+      同来源同版本不同内容的事件隔离待裁决；来源 / 归档 / 候选三重核对一致且隔离清零后，才原子替换现网，
+      失败保留旧版并可从已归档位置续跑。
+    </p>
+    <p class="small" style="margin:0">
+      <a class="btn small" href="/replay">去整包重放</a>
+      <a class="btn secondary small" href="/api/publication">看当前现网 JSON</a>
     </p>
   </div>
 </section>

@@ -3,10 +3,14 @@
 归档口径（对外承诺）：
 - 每个事件保留 `source`（文件名）与 `line_no`（文件行号，从 1 开始），
   行号是后续所有结论的「依据坐标」，必须原样保留。
-- 归档只做校验与入库，不做任何业务判定；重复启动不重复导入（唯一键 source+line_no）。
+- 重复识别按「来源 + 内容指纹」（`Event.fingerprint`），与行号无关：
+  源库压缩历史导致行号整体前移后，同一事件指纹不变，重放不会误判、不会新增。
+- 归档只做校验与入库，不做任何业务判定；重复启动不重复导入
+  （唯一键 source + fingerprint + occur，见 store.archive_events）。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -57,6 +61,31 @@ class Event:
     @property
     def is_delete(self) -> bool:
         return self.op == OP_DELETE
+
+    @property
+    def fingerprint(self) -> str:
+        """内容指纹：同一来源内识别「同一事件」的依据（与行号无关）。
+
+        覆盖表 / 键 / 版本 / op / 事件时间 / schema 版本 / after 全部内容，
+        归一化（键排序 + 紧凑分隔符）后取 sha256。源库压缩历史、行号重排
+        都不会改变指纹；只有内容真实变化才会得到新指纹。
+        """
+        payload = {
+            "table": self.table,
+            "pk": self.pk,
+            "version": self.version,
+            "op": self.op,
+            "ts": self.ts_iso,
+            "schema_version": self.schema_version,
+            "after": self.after,
+        }
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @property
+    def identity(self) -> tuple:
+        """隔离判定的身份键：同来源同 (表, 键, 版本) 内容不同 → 隔离待裁决。"""
+        return (self.table, self.pk, self.version)
 
     def to_row(self) -> dict:
         return {
