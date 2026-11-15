@@ -1,0 +1,147 @@
+{
+  "version": 2,
+  "label": "目标表结构 v2（上游变更申请，等待门禁放行）",
+  "tables": {
+    "orders": {
+      "label": "订单库 orders",
+      "columns": [
+        {
+          "name": "order_id",
+          "type": "string",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "customer_id",
+          "type": "string",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "amount",
+          "type": "long",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "qty",
+          "type": "int",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "fulfillment_note",
+          "type": "string",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        }
+      ]
+    },
+    "customers": {
+      "label": "客户库 customers",
+      "columns": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "tier",
+          "type": "string",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "loyalty_tier",
+          "type": "string",
+          "nullable": false,
+          "default": "standard"
+        },
+        {
+          "name": "phone",
+          "type": "string",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        }
+      ]
+    },
+    "inventory": {
+      "label": "库存库 inventory",
+      "columns": [
+        {
+          "name": "sku",
+          "type": "string",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "warehouse",
+          "type": "string",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "on_hand",
+          "type": "int",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "reserved",
+          "type": "long",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "bin_code",
+          "type": "string",
+          "nullable": true,
+          "default": null
+        },
+        {
+          "name": "reorder_point",
+          "type": "long",
+          "nullable": false,
+          "default": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false,
+          "default": null
+        }
+      ]
+    }
+  }
+}

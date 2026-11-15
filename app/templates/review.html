@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block title %}复核与导出 · {{ app_short }}{% endblock %}
+{% block crumb %}复核与导出{% endblock %}
+{% block meta %}<span class="dot {% if runs %}ok{% else %}warn{% endif %}"></span>历史运行 {{ run_count }} 次{% if selected %} · 当前 {{ selected.run_id }}{% endif %}{% endblock %}
+{% block actions %}
+{% if selected %}<a class="btn secondary small" href="/api/runs/{{ selected.run_id }}/snapshot">导出快照 JSON</a>{% endif %}
+<a class="btn small" href="/workbench">回工作台</a>
+{% endblock %}
+{% block status_left %}历史运行全部落在 SQLite 命名卷 <code>cdcwater-data</code>，容器重启不丢 · 每次运行都能回看逐条变更日志{% endblock %}
+{% block status_right %}{% if selected %}当前运行 <code>{{ selected.run_id }}</code>{% else %}{{ app_short }}{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">复核与导出</h1>
+    <p class="page-sub">每行是一次落库的运行；点运行号切换右侧变更日志。筛选项按结论过滤（服务端），搜索与导出 CSV 在浏览器端即时生效；
+      快照 JSON 含每表最终行与墓碑、水位线、冲突明细、迟到位置、门禁结论与全部 180 条变更日志。</p>
+  </div>
+  <div class="page-head-actions">
+    {% if selected %}<a class="btn small" href="/api/runs/{{ selected.run_id }}/snapshot">导出快照 JSON</a>{% endif %}
+    <a class="btn secondary small" href="/workbench">执行新合并</a>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="k-label">历史运行</div>
+    <div class="k-value">{{ run_count }}</div>
+    <div class="k-note">最近 50 次（倒序）</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">本次变更日志</div>
+    <div class="k-value">{{ selected.result.changelog|length if selected else 0 }}</div>
+    <div class="k-note">页面最多显示 200 条</div>
+  </div>
+  <div class="kpi {% if selected and selected.summary.conflicts %}err{% endif %}">
+    <div class="k-label">本次同版本冲突</div>
+    <div class="k-value">{{ selected.summary.conflicts if selected else 0 }}</div>
+    <div class="k-note">保留先到内容，需人工裁决</div>
+  </div>
+  <div class="kpi {% if selected and selected.summary.late %}warn{% endif %}">
+    <div class="k-label">本次迟到事件</div>
+    <div class="k-value">{{ selected.summary.late if selected else 0 }}</div>
+    <div class="k-note">含 {{ selected.summary.ignored_after_tombstone if selected else 0 }} 条墓碑后忽略</div>
+  </div>
+</div>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>历史运行（{{ run_count }} 次）</h2>
+    <div class="panel-actions">
+      <span class="tag">倒序 · 最近 50 次</span>
+      <a class="btn secondary small" href="/api/runs">看 JSON</a>
+    </div>
+  </div>
+  {% if runs %}
+  <div class="table-wrap roomy">
+    <table class="dense" id="runs-table" data-export-name="cdcwater-runs.csv">
+      <thead>
+        <tr><th>运行</th><th>时间</th><th>表</th><th>schema</th><th class="num">最终行</th>
+          <th class="num">冲突</th><th class="num">迟到</th><th class="num">墓碑后忽略</th>
+          <th>水位线 / 未闭合</th><th>门禁</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        {% for run in runs %}
+        <tr class="{{ 'selected' if selected and run.run_id == selected.run_id else '' }}">
+          <td class="nowrap"><a class="mono" href="/review?run_id={{ run.run_id }}">{{ run.run_id }}</a></td>
+          <td class="small muted nowrap" style="font-size:11.5px">{{ run.created_at }}</td>
+          <td class="small nowrap">{{ run.tables|join(', ') }}</td>
+          <td class="small">v{{ run.schema_version }}</td>
+          <td class="num">{{ run.summary.alive_rows }}</td>
+          <td class="num">{{ run.summary.conflicts }}</td>
+          <td class="num">{{ run.summary.late }}</td>
+          <td class="num">{{ run.summary.ignored_after_tombstone }}</td>
+          <td class="small"><span class="mono nowrap" style="font-size:11.5px">{{ run.summary.watermark }}</span><div class="small muted">未闭合 {{ run.summary.open_keys }}</div></td>
+          <td><span class="tag {{ 'err' if run.summary.gate_verdict == 'blocked' else ('warn' if run.summary.gate_verdict == 'compatible_with_backfill' else 'ok') }}">{{ verdict_labels.get(run.summary.gate_verdict, run.summary.gate_verdict) }}</span></td>
+          <td class="small">
+            <a href="/result/{{ run.run_id }}">结果页</a> ·
+            <a href="/api/runs/{{ run.run_id }}/snapshot">快照</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">
+    <strong>还没有任何运行记录</strong>
+    去 <a href="/workbench">工作台</a> 执行一次合并，历史运行、变更日志与快照下载都会出现在这里。
+  </div>
+  {% endif %}
+</section>
+
+{% if selected %}
+<div class="split result">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>变更日志 · {{ selected.run_id }}</h2>
+      <div class="panel-actions">
+        <span class="tag">共 {{ selected.result.changelog|length }} 条</span>
+        <a class="btn secondary small" href="/result/{{ selected.run_id }}">打开结果页</a>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <form method="get" action="/review" style="display:flex;gap:8px;align-items:center;margin:0">
+        <input type="hidden" name="run_id" value="{{ selected.run_id }}">
+        <label for="kind" class="small muted" style="margin:0">按结论筛选</label>
+        <select id="kind" name="kind" onchange="this.form.submit()">
+          <option value="">全部结论（{{ selected.result.changelog|length }} 条）</option>
+          {% for item in kinds %}
+          <option value="{{ item }}" {{ 'selected' if item == active_kind else '' }}>{{ kind_labels.get(item, item) }}</option>
+          {% endfor %}
+        </select>
+        <noscript><button type="submit" class="btn secondary small">筛选</button></noscript>
+      </form>
+      <input type="search" id="review-search" placeholder="搜索表 / 键 / 行号 / 结论" aria-label="搜索变更日志">
+      <span class="spacer"></span>
+      <span class="small muted" id="review-stat">本页 {{ entries|length }} 条（共 {{ selected.result.changelog|length }} 条）</span>
+      <a class="btn secondary small" href="/api/runs/{{ selected.run_id }}/snapshot">导出快照</a>
+      <button type="button" class="btn secondary small" data-export-csv="changelog-table" data-export-name="cdcwater-changelog.csv">导出 CSV</button>
+    </div>
+
+    <div class="table-wrap roomy">
+      <table class="dense" id="changelog-table" data-export-name="cdcwater-changelog.csv">
+        <thead>
+          <tr><th class="num">#</th><th>表</th><th>归档行号</th><th>键</th><th class="num">版本</th>
+            <th>op</th><th>事件 ts</th><th>结论</th><th>依据</th></tr>
+        </thead>
+        <tbody>
+          {% for entry in entries %}
+          <tr data-search="{{ entry.table }} {{ entry.pk }} 第{{ entry.line_no }}行 {{ entry.kind_label }} {{ entry.op }} v{{ entry.version }}{% if entry.late %} 迟到{% endif %}"
+              class="{{ 'row-conflict' if entry.kind == 'conflict' else '' }}{{ ' row-late' if entry.late else '' }}">
+            <td class="num small muted">{{ entry.seq }}</td>
+            <td class="small nowrap">{{ entry.table }}</td>
+            <td class="mono small nowrap">第 {{ entry.line_no }} 行</td>
+            <td class="mono small nowrap">{{ entry.pk }}</td>
+            <td class="num nowrap">v{{ entry.version }}</td>
+            <td class="small nowrap">{{ op_labels.get(entry.op, entry.op) }}</td>
+            <td class="small mono nowrap">{{ entry.ts }}</td>
+            <td class="small nowrap">
+              <span class="tag {{ 'err' if entry.kind == 'conflict' else ('warn' if entry.kind in ('ignored_after_tombstone', 'superseded', 'deduped') else 'ok') }}">{{ entry.kind_label }}</span>
+              {% if entry.late %}<span class="tag warn">迟到</span>{% endif %}
+            </td>
+            <td class="small muted">{{ entry.reason }}{% if entry.diff %}（差异字段：{{ entry.diff|join('、') }}）{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if entries|length == 0 %}
+    <div class="empty">该结论下没有日志条目。<a href="/review?run_id={{ selected.run_id }}">看全部结论</a></div>
+    {% endif %}
+    <div class="panel-actions">
+      <span class="small muted" style="align-self:center">
+        每条都带表名 + 文件行号 + 键 + 版本，可回到 <code>sample_data/events/*.jsonl</code> 逐行核对；
+        页面最多显示 200 条，完整 180 条在下载的快照 JSON 里。
+      </span>
+    </div>
+  </section>
+
+  <div>
+    <section class="panel pane-sticky">
+      <div class="panel-head">
+        <h2>本次运行</h2>
+        <div class="panel-actions"><span class="tag">{{ selected.run_id }}</span></div>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <tbody>
+            <tr><th style="width:110px">运行号</th><td class="mono">{{ selected.run_id }}</td></tr>
+            <tr><th>时间</th><td class="small">{{ selected.created_at }}</td></tr>
+            <tr><th>表</th><td class="small">{{ selected.tables|join(' / ') }}</td></tr>
+            <tr><th>目标 schema</th><td class="small">v{{ selected.schema_version }}（基线 v{{ selected.result.gate.base_version }}）</td></tr>
+            <tr><th>门禁总判定</th><td>
+              <span class="tag {{ 'err' if selected.summary.gate_verdict == 'blocked' else ('warn' if selected.summary.gate_verdict == 'compatible_with_backfill' else 'ok') }}">{{ verdict_labels.get(selected.summary.gate_verdict, selected.summary.gate_verdict) }}</span>
+              <span class="small muted">（可放行 {{ selected.result.gate.counts.compatible }} / 回填 {{ selected.result.gate.counts.compatible_with_backfill }} / 阻断 {{ selected.result.gate.counts.blocked }}）</span>
+            </td></tr>
+            <tr><th>最终行 / 墓碑</th><td class="small">{{ selected.summary.alive_rows }} 行 / {{ selected.summary.tombstones }} 个墓碑</td></tr>
+            <tr><th>冲突 / 迟到</th><td class="small">{{ selected.summary.conflicts }} 条冲突 / {{ selected.summary.late }} 条迟到（{{ selected.summary.ignored_after_tombstone }} 条墓碑后忽略）</td></tr>
+            <tr><th>水位线</th><td class="small mono">{{ selected.summary.watermark }}</td></tr>
+            <tr><th>未闭合键</th><td class="small">{{ selected.summary.open_keys }} / {{ selected.summary['keys'] }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-actions">
+        <a class="btn small" href="/api/runs/{{ selected.run_id }}/snapshot">下载快照 JSON</a>
+        <a class="btn secondary small" href="/result/{{ selected.run_id }}">结果页</a>
+      </div>
+    </section>
+
+    <details class="help" style="margin-top:12px">
+      <summary>API 自测（curl）</summary>
+      <pre style="margin:6px 0 0">curl -s http://127.0.0.1:18213/health
+curl -s -X POST http://127.0.0.1:18213/api/merge -H 'Content-Type: application/json' \
+  -d '{"tables":["orders","customers","inventory"],"schema_version":2}'
+curl -s http://127.0.0.1:18213/api/runs/{{ selected.run_id }} | python3 -m json.tool
+curl -s -OJ http://127.0.0.1:18213/api/runs/{{ selected.run_id }}/snapshot</pre>
+    </details>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

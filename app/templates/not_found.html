@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}没有找到运行 · {{ app_short }}{% endblock %}
+{% block crumb %}没有找到运行{% endblock %}
+{% block meta %}<span class="dot err"></span>运行 {{ run_id }} 不存在{% endblock %}
+{% block actions %}<a class="btn small" href="/workbench">回工作台执行合并</a>{% endblock %}
+{% block status_left %}运行记录保存在 SQLite 命名卷；<code>docker compose down -v</code> 会连同历史运行一起删除{% endblock %}
+{% block status_right %}{{ app_short }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">没有找到这次运行</h1>
+    <p class="page-sub">{{ error }}</p>
+  </div>
+</div>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>运行记录已不存在</h2>
+    <div class="panel-actions"><span class="tag mono">{{ run_id }}</span></div>
+  </div>
+  <div class="panel-body">
+    <p class="muted" style="margin-top:0">运行记录保存在 SQLite 命名卷里；如果执行过 <code>docker compose down -v</code>，
+      历史运行会随卷一起删除，需要重新执行一次合并。</p>
+    <p style="margin-bottom:0">
+      <a class="btn small" href="/workbench">回工作台执行合并</a>
+      <a class="btn secondary small" href="/review">查看历史运行</a>
+    </p>
+  </div>
+</section>
+{% endblock %}

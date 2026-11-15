@@ -1,0 +1,299 @@
+{% extends "base.html" %}
+{% block title %}事件工作台 · {{ app_short }}{% endblock %}
+{% block crumb %}事件工作台{% endblock %}
+{% block meta %}<span class="dot ok"></span>{{ tables_meta|length }} 张表 · 6 步流水线 · 结果写入 SQLite{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/" >回总览</a>
+<a class="btn secondary small" href="/review">复核与导出</a>
+{% endblock %}
+{% block status_left %}归档 → 同键合并 → 墓碑 → 迟到/水位线 → 门禁 → 快照 · 运行写入 SQLite 命名卷{% endblock %}
+{% block status_right %}{% if recent %}最近运行 <code>{{ recent[0].run_id }}</code>{% else %}{{ app_short }}{% endif %}{% endblock %}
+
+{% block content %}
+{% set agg = namespace(events=0, keys=0) %}
+{% for _name, _item in overview.items() %}
+{% set agg.events = agg.events + _item['events'] %}
+{% set agg.keys = agg.keys + _item['keys'] %}
+{% endfor %}
+{% set last = recent[0] if recent else none %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">事件工作台</h1>
+    <p class="page-sub">选表 → 选目标 schema 版本 → 执行合并。后端依次完成归档 → 同键合并 → 墓碑判定 → 迟到/水位线 → schema 门禁 → 快照，
+      结果写入 SQLite 并生成可回看的 run_id。</p>
+  </div>
+</div>
+
+<div class="split">
+  <section class="panel pane-sticky" id="m1">
+    <div class="panel-head">
+      <h2>合并任务</h2>
+      <div class="panel-actions"><span class="tag">模块 1/6 · 事件归档</span></div>
+    </div>
+    <div class="panel-body">
+      <form id="merge-form" data-page="workbench">
+        <div class="field">
+          <label>1. 选择表（可多选）</label>
+          <div class="check-list">
+            {% for item in tables_meta %}
+            {% set stat = overview.get(item.name, {}) %}
+            <label class="check-item">
+              <input type="checkbox" name="tables" value="{{ item.name }}" checked>
+              <span>
+                <strong>{{ item.label }}</strong>
+                <span class="muted small">· {{ stat.get('events', 0) }} 条事件 / {{ stat.get('keys', 0) }} 个键</span>
+                <div class="small muted">{{ item.desc }}</div>
+              </span>
+            </label>
+            {% endfor %}
+          </div>
+          <p class="small muted" style="margin:6px 0 0">取消勾选可只跑一张表；门禁结论也只会针对选中的表。</p>
+        </div>
+
+        <div class="field">
+          <label>2. 目标 schema 版本</label>
+          <div class="check-list">
+            <label class="check-item">
+              <input type="radio" name="schema_version" value="2" checked>
+              <span><strong>v2（变更申请）</strong>
+                <div class="small muted">对比基线 v1，逐条评估放行 / 回填 / 阻断。</div></span>
+            </label>
+            <label class="check-item">
+              <input type="radio" name="schema_version" value="1">
+              <span><strong>v1（基线自身）</strong>
+                <div class="small muted">v1 对 v1 无结构变更，门禁必然可放行（用于对照）。</div></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="alert alert-error" id="form-error" role="alert" hidden></div>
+
+        <details class="help" style="margin-top:4px">
+          <summary>合并口径（迟到 / 同版本 / 墓碑 / 水位线）</summary>
+          <ul class="list small" style="margin-bottom:0">
+            <li><strong>迟到</strong>：按文件行序处理，事件 <code>ts</code> 小于「当前已处理最大 ts」即判迟到（相等不算）。</li>
+            <li><strong>同版本</strong>：内容按字段排序后逐字比较；一致 → 静默去重；不一致 → 冲突且保留先到内容。</li>
+            <li><strong>墓碑</strong>：<code>op=d</code> 一旦写入就保留；之后版本更低的事件不改状态，只计 <code>ignored_after_tombstone</code>。</li>
+            <li><strong>水位线</strong>：<code>min(每个键已处理事件的最大 ts)</code>；高于水位线的键为未闭合键。</li>
+          </ul>
+        </details>
+      </form>
+    </div>
+    <div class="panel-actions">
+      <button type="submit" id="run-btn" form="merge-form">执行合并</button>
+      <button type="reset" class="secondary" form="merge-form">重置选择</button>
+      <span class="small muted" id="form-hint" style="align-self:center">预计 180 条事件 / 3 张表</span>
+    </div>
+  </section>
+
+  <div>
+    <div class="kpi-strip">
+      <div class="kpi">
+        <div class="k-label">归档事件</div>
+        <div class="k-value">{{ agg.events }}</div>
+        <div class="k-note">{{ tables_meta|length }} 张表 · {{ agg.keys }} 个键</div>
+      </div>
+      <div class="kpi {% if last and last.summary.conflicts %}err{% endif %}">
+        <div class="k-label">最近运行冲突</div>
+        <div class="k-value">{{ last.summary.conflicts if last else 0 }}</div>
+        <div class="k-note">{{ last.created_at if last else '尚未运行过' }}</div>
+      </div>
+      <div class="kpi {% if last and last.summary.late %}warn{% endif %}">
+        <div class="k-label">最近运行迟到</div>
+        <div class="k-value">{{ last.summary.late if last else 0 }}</div>
+        <div class="k-note">含 {{ last.summary.ignored_after_tombstone if last else 0 }} 条墓碑后忽略</div>
+      </div>
+      <div class="kpi {% if last and last.summary.gate_verdict == 'blocked' %}err{% elif last %}warn{% endif %}">
+        <div class="k-label">最近门禁结论</div>
+        <div class="k-value" style="font-size:15px">{{ verdict_labels.get(last.summary.gate_verdict, '待运行') if last else '待运行' }}</div>
+        <div class="k-note">可放行 / 回填 / 阻断逐条给理由</div>
+      </div>
+      <div class="kpi">
+        <div class="k-label">最近运行的阻断结论</div>
+        <div class="k-value">{{ last.summary.gate_counts.blocked if last else 0 }}</div>
+        <div class="k-note">本次门禁阻断条数</div>
+      </div>
+    </div>
+
+    <section class="panel" id="m2">
+      <div class="panel-head">
+        <h2>执行进度</h2>
+        <div class="panel-actions">
+          <span class="tag">模块 2/6 · 同键合并</span>
+          <span class="tag">6 步</span>
+        </div>
+      </div>
+      <div class="panel-body tight">
+        <ol class="steps" id="progress-steps">
+          <li data-step="archive"><span class="dot"></span>归档事件（读取 SQLite 中的 CDC 事件）</li>
+          <li data-step="merge"><span class="dot"></span>同键合并（最大版本 / 同版本去重或冲突）</li>
+          <li data-step="tomb"><span class="dot"></span>墓碑处理（忽略墓碑后低版本）</li>
+          <li data-step="wm"><span class="dot"></span>迟到判定与水位线推进</li>
+          <li data-step="gate"><span class="dot"></span>Schema 门禁逐条结论</li>
+          <li data-step="snap"><span class="dot"></span>快照组装与落库</li>
+        </ol>
+        <p class="small muted" id="progress-note" style="margin:8px 0 0">尚未开始：点左侧「执行合并」。</p>
+      </div>
+    </section>
+
+    <section class="panel" id="summary-card" hidden>
+      <div class="panel-head">
+        <h2>即时摘要</h2>
+        <div class="panel-actions"><span class="tag">本次运行</span></div>
+      </div>
+      <div class="panel-body tight">
+        <div class="kpi-strip" id="summary-metrics" style="margin-bottom:8px"></div>
+        <div class="alert alert-info" id="summary-gate" style="margin-bottom:8px"></div>
+        <p class="small" style="margin:0">
+          <a class="btn small" id="result-link" href="#">打开结果页（逐条依据）</a>
+          <a class="btn secondary small" id="snapshot-link" href="#">下载快照 JSON</a>
+          <a class="btn secondary small" href="/review">复核与导出</a>
+        </p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>样例事件归档概览</h2>
+        <div class="panel-actions">
+          <span class="tag">事件 → 结果预览</span>
+          <a class="btn secondary small" href="/api/samples">看 JSON</a>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead>
+            <tr><th>表 / 样例文件</th><th class="num">事件</th><th class="num">键</th>
+              <th>op 分布</th><th>schema 版本</th><th>事件时间区间</th></tr>
+          </thead>
+          <tbody>
+            {% for name, item in overview.items() %}
+            <tr>
+              <td class="nowrap"><strong>{{ item.label }}</strong>
+                <div class="small muted mono">events/{{ item.file }}</div></td>
+              <td class="num">{{ item.events }}</td>
+              <td class="num">{{ item['keys'] }}</td>
+              <td class="small">
+                {% for op, n in item.ops.items() %}{{ op_labels.get(op, op) }}:{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+              </td>
+              <td class="small">
+                {% for ver, n in item.schema_versions.items() %}v{{ ver }}:{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+              </td>
+              <td class="small muted">{{ item.first_ts }} → {{ item.last_ts }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="m3">
+      <div class="panel-head">
+        <h2>墓碑处理口径</h2>
+        <div class="panel-actions"><span class="tag">模块 3/6 · 墓碑处理</span></div>
+      </div>
+      <div class="panel-body tight">
+        <p class="small" style="margin:0 0 4px">
+          <code>op=d</code> 且版本高于后续 c/u → 键判删除；<strong>墓碑必须保留</strong>，
+          墓碑后到达的低版本 c/u 一律忽略并计入 <code>ignored_after_tombstone</code>；
+          只有严格更高版本的事件才会让键复活。
+        </p>
+        <p class="small muted" style="margin:0">
+          样例：orders / inventory 各 1 个墓碑，第 58 行是「墓碑后迟到」——既计入迟到，也计入墓碑后忽略。
+        </p>
+      </div>
+    </section>
+
+    <section class="panel" id="m4">
+      <div class="panel-head">
+        <h2>乱序与水位线口径</h2>
+        <div class="panel-actions"><span class="tag">模块 4/6 · 乱序/水位</span></div>
+      </div>
+      <div class="panel-body tight">
+        <p class="small" style="margin:0 0 4px">
+          按文件行序处理，事件 <code>ts</code> 小于「当前已处理最大 ts」即判迟到（相等不算）；
+          迟到事件仍按版本规则参与合并，位置按「表 + 文件行号 + 键 + 版本」记录。
+        </p>
+        <p class="small muted" style="margin:0">
+          <code>watermark = min(每个键已处理事件的最大 ts)</code>，水位线及以下的键视为已闭合；
+          高于水位线的键为未闭合键，暂不能清理其墓碑。
+        </p>
+      </div>
+    </section>
+
+    <section class="panel" id="m5">
+      <div class="panel-head">
+        <h2>Schema 门禁：v1 → v2 变更申请</h2>
+        <div class="panel-actions"><span class="tag">模块 5/6 · schema 门禁</span></div>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>表</th><th class="num">v1 列数</th><th class="num">v2 列数</th><th>门禁口径</th></tr></thead>
+          <tbody>
+            {% for item in tables_meta %}
+            {% set name = item.name %}
+            {% set cols1 = (schema_v1.tables.get(name) or {}).get('columns', []) %}
+            {% set cols2 = (schema_v2.tables.get(name) or {}).get('columns', []) %}
+            <tr>
+              <td><strong>{{ item.label }}</strong><div class="small muted mono">{{ name }}</div></td>
+              <td class="num">{{ cols1|length }}</td>
+              <td class="num">{{ cols2|length }}</td>
+              <td class="small muted">
+                新增 nullable → 可放行；新增带默认值 → 放行+回填；
+                删列 / 类型收窄 / 新增非空无默认 / 可空收紧 → 阻断（逐条给理由与列位置）。
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">门禁结论在执行合并后生成：结果页「门禁」分段逐条列出可放行 / 放行+回填 / 阻断及理由。</p>
+      </div>
+    </section>
+
+    <section class="panel" id="m6">
+      <div class="panel-head">
+        <h2>最近运行与快照</h2>
+        <div class="panel-actions">
+          <span class="tag">模块 6/6 · 快照导出</span>
+          <a class="btn secondary small" href="/review">全部运行</a>
+        </div>
+      </div>
+      {% if recent %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead>
+            <tr><th>运行</th><th>时间</th><th>表</th><th class="num">冲突</th><th class="num">迟到</th>
+              <th>水位线</th><th>门禁</th><th>快照</th></tr>
+          </thead>
+          <tbody>
+            {% for run in recent %}
+            <tr>
+              <td class="nowrap"><a class="mono" href="/result/{{ run.run_id }}">{{ run.run_id }}</a></td>
+              <td class="small muted nowrap">{{ run.created_at }}</td>
+              <td class="small">{{ run.tables|join(', ') }}</td>
+              <td class="num">{{ run.summary.conflicts }}</td>
+              <td class="num">{{ run.summary.late }}</td>
+              <td class="small mono nowrap" style="font-size:11.5px">{{ run.summary.watermark }}</td>
+              <td><span class="tag {{ 'err' if run.summary.gate_verdict == 'blocked' else ('warn' if run.summary.gate_verdict == 'compatible_with_backfill' else 'ok') }}">{{ verdict_labels.get(run.summary.gate_verdict, run.summary.gate_verdict) }}</span></td>
+              <td class="nowrap"><a class="small" href="/api/runs/{{ run.run_id }}/snapshot">JSON</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">
+        <strong>还没有运行记录</strong>
+        点左侧「执行合并」后会生成 run_id，这里出现逐条可回看的历史与快照下载入口。
+      </div>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>window.__workbench = true;</script>
+{% endblock %}

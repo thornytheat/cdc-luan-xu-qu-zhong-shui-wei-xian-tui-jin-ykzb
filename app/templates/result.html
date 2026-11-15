@@ -1,0 +1,427 @@
+{% extends "base.html" %}
+{% block title %}合并结果 {{ run.run_id }} · {{ app_short }}{% endblock %}
+{% block crumb %}合并结果{% endblock %}
+{% block meta %}{% set v = summary.gate_verdict %}<span class="dot {{ 'err' if v == 'blocked' else ('warn' if v == 'compatible_with_backfill' else 'ok') }}"></span>总判定 {{ verdict_labels.get(v, v) }} · {{ summary.conflicts }} 冲突 · {{ summary.late }} 迟到{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/workbench">回工作台</a>
+<a class="btn small" href="/api/runs/{{ run.run_id }}/snapshot">下载快照 JSON</a>
+{% endblock %}
+{% block status_left %}run_id {{ run.run_id }} · 生成于 {{ run.created_at }} · 快照 {{ (snapshot_bytes / 1024) | round(1) }} KB{% endblock %}
+{% block status_right %}{{ app_short }} · 基线 v{{ result.gate.base_version }} → 目标 v{{ result.gate.target_version }}{% endblock %}
+
+{% block content %}
+{% set verdict = summary.gate_verdict %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">合并结果 · <span class="mono">{{ run.run_id }}</span></h1>
+    <p class="page-sub">
+      {{ run.created_at }} · 表 {{ run.tables|join(' / ') }} ·
+      基线 schema v{{ result.gate.base_version }} → 目标 v{{ result.gate.target_version }} ·
+      归档事件 {{ summary.events }} 条 · 快照 {{ (snapshot_bytes / 1024) | round(1) }} KB ·
+      总判定 <span class="tag {{ 'err' if verdict == 'blocked' else ('warn' if verdict == 'compatible_with_backfill' else 'ok') }}">{{ verdict_labels.get(verdict, verdict) }}</span>
+      {% if verdict == 'blocked' %}· 这次 schema 变更不放行
+      {% elif verdict == 'compatible_with_backfill' %}· 可放行，需回填历史行
+      {% else %}· 变更可直接放行{% endif %}
+    </p>
+  </div>
+  <div class="page-head-actions">
+    <a class="btn secondary small" href="/review?run_id={{ run.run_id }}">到复核页看变更日志</a>
+    <a class="btn secondary small" href="/workbench">再跑一次</a>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="k-label">合并后最终行数</div>
+    <div class="k-value">{{ summary.alive_rows }}</div>
+    <div class="k-note">存活键（共 {{ summary['keys'] }} 个键）</div>
+  </div>
+  <div class="kpi {% if summary.conflicts %}err{% endif %}">
+    <div class="k-label">同版本不同内容冲突</div>
+    <div class="k-value">{{ summary.conflicts }}</div>
+    <div class="k-note">需人工裁决，保留先到内容</div>
+  </div>
+  <div class="kpi {% if summary.late %}warn{% endif %}">
+    <div class="k-label">迟到事件</div>
+    <div class="k-value">{{ summary.late }}</div>
+    <div class="k-note">含 {{ summary.ignored_after_tombstone }} 条墓碑后忽略</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">删除墓碑</div>
+    <div class="k-value">{{ summary.tombstones }}</div>
+    <div class="k-note">墓碑保留，不清理</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">全局水位线（UTC）</div>
+    <div class="k-value" style="font-size:13px;font-family:var(--font-mono);letter-spacing:0">{{ summary.watermark }}</div>
+    <div class="k-note">min(每键最大 ts)</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">未闭合键</div>
+    <div class="k-value">{{ summary.open_keys }}/{{ summary['keys'] }}</div>
+    <div class="k-note">还在等更晚事件，暂不能清墓碑</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head">
+    <div class="segmented">
+      <button type="button" data-tab-target="tab-snapshot" class="active">快照</button>
+      <button type="button" data-tab-target="tab-conflict">冲突</button>
+      <button type="button" data-tab-target="tab-late">迟到与水位</button>
+      <button type="button" data-tab-target="tab-gate">门禁</button>
+      <button type="button" data-tab-target="tab-log">日志</button>
+    </div>
+    <div class="panel-actions">
+      <span class="tag">{{ summary.events }} 条事件</span>
+      <span class="tag {{ 'err' if verdict == 'blocked' else ('warn' if verdict == 'compatible_with_backfill' else 'ok') }}">{{ verdict_labels.get(verdict, verdict) }}</span>
+      <a class="btn secondary small" href="/api/runs/{{ run.run_id }}/snapshot">下载快照 JSON</a>
+    </div>
+  </div>
+
+  <div id="tab-snapshot" class="tab-panel">
+    <div class="panel-body tight">
+      <p class="small" style="margin:0">
+        <strong>合并：</strong>{{ summary.alive_rows }} 行最终态 + {{ summary.tombstones }} 个墓碑（共 {{ summary['keys'] }} 个键）；
+        <strong>{{ summary.conflicts }} 条同版本冲突</strong>需人工裁决，另有 {{ summary.deduped_silent }} 条同内容重复已静默去重、
+        {{ summary.superseded }} 条低版本被丢弃。
+      </p>
+    </div>
+
+    <div class="panel-body tight" style="border-top:1px solid var(--line)">
+      <h3 style="margin:0 0 8px">每表合并结果</h3>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr>
+            <th>表</th><th class="num">事件</th><th class="num">键</th><th class="num">最终行</th>
+            <th class="num">墓碑</th><th class="num">冲突</th><th class="num">迟到</th>
+            <th class="num">低版本丢弃</th><th class="num">墓碑后忽略</th><th>表水位线</th><th class="num">未闭合</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for table, payload in result.tables.items() %}
+          <tr>
+            <td><strong>{{ payload.label }}</strong><div class="small muted mono">{{ table }}</div></td>
+            <td class="num">{{ payload.counters.events }}</td>
+            <td class="num">{{ payload.key_count }}</td>
+            <td class="num">{{ payload.row_count }}</td>
+            <td class="num">{{ payload.tombstone_count }}</td>
+            <td class="num">{{ payload.counters.conflicts }}</td>
+            <td class="num">{{ payload.counters.late }}</td>
+            <td class="num">{{ payload.counters.superseded }}</td>
+            <td class="num">{{ payload.counters.ignored_after_tombstone }}</td>
+            <td class="small mono nowrap">{{ payload.watermark.watermark }}</td>
+            <td class="num">{{ payload.watermark.open_keys }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel-body tight" style="border-top:1px solid var(--line)">
+      <h3 style="margin:0 0 8px">删除墓碑（{{ result.tables.values()|map(attribute='tombstone_count')|sum }} 个 · 必须保留）</h3>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead><tr><th>表</th><th>键</th><th class="num">墓碑版本</th><th>墓碑归档行号</th><th>墓碑 ts</th><th>其后被忽略的事件</th></tr></thead>
+        <tbody>
+          {% for table, payload in result.tables.items() %}
+            {% for row in payload.tombstones %}
+            <tr>
+              <td class="nowrap">{{ table }}</td>
+              <td class="mono">{{ row.pk }}</td>
+              <td class="num">v{{ row.tombstone_version }}</td>
+              <td class="mono nowrap">第 {{ row.tombstone_line_no }} 行</td>
+              <td class="small mono nowrap">{{ row.ts }}</td>
+              <td class="small">
+                {% if payload.ignored_line_nos %}
+                  {% for line in payload.ignored_line_nos %}<span class="tag warn">第 {{ line }} 行</span>{% endfor %}
+                {% else %}<span class="muted">无</span>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          {% else %}
+          <tr><td colspan="6" class="muted">本次没有墓碑。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel-body tight">
+      <p class="small muted" style="margin:0">墓碑后到达的低版本 c/u 一律忽略并计入 <code>ignored_after_tombstone</code>；
+        只有严格更高版本的事件才会让键复活（本次未出现复活）。</p>
+    </div>
+
+    <div class="panel-body tight" style="border-top:1px solid var(--line)">
+      <h3 style="margin:0 0 8px">快照预览（每表前 6 行）</h3>
+      <p class="small muted" style="margin:0">
+        下载的 JSON 包含：每表最终行与墓碑、全局与分表水位线、冲突明细、迟到位置、门禁结论、全部变更日志。
+      </p>
+    </div>
+    {% for table, preview_data in preview.items() %}
+    <div class="panel-body tight" style="border-top:1px solid var(--line)">
+      <h3 style="margin:0 0 8px">{{ preview_data.label }} <span class="tag">{{ preview_data.row_count }} 行 · 显示 {{ preview_data.shown }} 行</span></h3>
+    </div>
+    <div class="table-wrap auto">
+      <table class="dense">
+        <thead>
+          <tr><th>键</th><th class="num">版本</th><th>事件 ts</th><th>归档行号</th>
+            {% for col in preview_data.columns %}<th class="mono">{{ col }}</th>{% endfor %}</tr>
+        </thead>
+        <tbody>
+          {% for row in preview_data.rows %}
+          <tr>
+            <td class="mono">{{ row.pk }}</td>
+            <td class="num">v{{ row.version }}</td>
+            <td class="small mono nowrap">{{ row.ts }}</td>
+            <td class="mono small nowrap">第 {{ row.line_no }} 行</td>
+            {% for value in row.cells %}<td class="small">{{ value if value is not none else '—' }}</td>{% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if preview_data.tombstones %}
+    <div class="panel-body tight">
+      <p class="small muted" style="margin:0">该表墓碑：{% for item in preview_data.tombstones %}<code>{{ item.pk }}</code> v{{ item.tombstone_version }}（第 {{ item.line_no }} 行）{% if not loop.last %}、{% endif %}{% endfor %}</p>
+    </div>
+    {% endif %}
+    {% endfor %}
+    <div class="panel-actions" style="border-top:1px solid var(--line)">
+      <a class="btn small" href="/api/runs/{{ run.run_id }}/snapshot">下载快照 JSON</a>
+      <a class="btn secondary small" href="/review?run_id={{ run.run_id }}">到复核页看变更日志</a>
+      <a class="btn secondary small" href="/workbench">再跑一次</a>
+    </div>
+  </div>
+
+  <div id="tab-conflict" class="tab-panel" hidden>
+    <div class="panel-body tight">
+      <h3 style="margin:0 0 8px">同版本冲突逐条（{{ result.conflicts|length }} 条）</h3>
+      <p class="small muted" style="margin:0">
+        同版本但内容不同：保留先到内容、不覆盖，列出两条事件的归档位置与差异字段，供人工裁决后重放。
+      </p>
+    </div>
+    <div class="table-wrap roomy">
+      <table class="dense">
+        <thead>
+          <tr><th>表</th><th>键</th><th class="num">版本</th><th>差异字段</th><th>事件</th><th>归档位置</th>
+            <th>事件 ts</th><th>op</th><th>schema</th><th>字段对比</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          {% for item in result.conflicts %}
+          <tr class="row-keep">
+            <td class="nowrap">{{ item.table }}</td>
+            <td class="mono">{{ item.pk }}</td>
+            <td class="num nowrap">v{{ item.version }}</td>
+            <td class="small">{{ item.diff|join('、') }}</td>
+            <td class="nowrap">先到（保留）</td>
+            <td class="mono nowrap">第 {{ item.first.line_no }} 行</td>
+            <td class="small mono nowrap">{{ item.first.ts }}</td>
+            <td class="small">{{ op_labels.get(item.first.op, item.first.op) }}</td>
+            <td class="small">v{{ item.first.schema_version }}</td>
+            <td class="small mono">
+              {% for field in item.diff %}{{ field }}={{ item.first.after.get(field) }}{% if not loop.last %} · {% endif %}{% endfor %}
+            </td>
+            <td class="small muted">保留先到内容，不覆盖</td>
+          </tr>
+          <tr class="row-conflict">
+            <td class="nowrap">{{ item.table }}</td>
+            <td class="mono">{{ item.pk }}</td>
+            <td class="num nowrap">v{{ item.version }}</td>
+            <td class="small">{{ item.diff|join('、') }}</td>
+            <td class="nowrap">后到（冲突，未覆盖）</td>
+            <td class="mono nowrap">第 {{ item.second.line_no }} 行</td>
+            <td class="small mono nowrap">{{ item.second.ts }}</td>
+            <td class="small">{{ op_labels.get(item.second.op, item.second.op) }}</td>
+            <td class="small">v{{ item.second.schema_version }}</td>
+            <td class="small mono">
+              {% for field in item.diff %}{{ field }}={{ item.second.after.get(field) }}{% if not loop.last %} · {% endif %}{% endfor %}
+            </td>
+            <td class="small muted">{{ item.reason }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="11" class="muted">本次没有冲突。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel-body tight">
+      <p class="small muted" style="margin:0">
+        差异字段按字段名排序后逐字比较；冲突只影响该字段的取值，其余字段仍按最大版本合并。
+      </p>
+    </div>
+  </div>
+
+  <div id="tab-late" class="tab-panel" hidden>
+    <div class="panel-body tight">
+      <p class="small" style="margin:0 0 4px">
+        <strong>乱序：</strong><strong>{{ summary.late }} 条迟到</strong>事件仍按版本规则参与合并；
+        其中 {{ summary.ignored_after_tombstone }} 条落在删除墓碑之后，已按规则忽略。
+      </p>
+      <p class="small" style="margin:0">
+        <strong>水位线：</strong><span class="mono">{{ summary.watermark }}</span>，
+        未闭合键 {{ summary.open_keys }} / {{ summary['keys'] }} —— 这些键还在等更晚的事件，暂不能清理其墓碑。
+      </p>
+    </div>
+
+    <div class="panel-body tight" style="border-top:1px solid var(--line)">
+      <h3 style="margin:0 0 8px">迟到事件（{{ late_rows|length }} 条 · 逐条位置）</h3>
+      <p class="small muted" style="margin:0">
+        判定口径：按文件行序处理，事件 ts &lt; 当时「已处理最大 ts」即判迟到（相等不算）。
+        迟到事件仍然参与版本合并，位置按「表 + 文件行号 + 键 + 版本」记录。
+      </p>
+    </div>
+    <div class="table-wrap">
+      <table class="dense">
+        <thead>
+          <tr><th>表</th><th>归档行号</th><th>键</th><th class="num">版本</th><th>事件 ts</th>
+            <th>当时最大 ts</th><th class="num">落后</th><th>合并结果</th></tr>
+        </thead>
+        <tbody>
+          {% for item in late_rows %}
+          <tr>
+            <td class="nowrap">{{ item.table }}</td>
+            <td class="mono nowrap">第 {{ item.line_no }} 行</td>
+            <td class="mono">{{ item.pk }}</td>
+            <td class="num">v{{ item.version }}</td>
+            <td class="small mono nowrap">{{ item.ts }}</td>
+            <td class="small mono nowrap">{{ item.running_max_ts }}</td>
+            <td class="num small">{{ item.behind_seconds }}s</td>
+            <td class="small">
+              <span class="tag {{ 'warn' if item.after_tombstone else ('ok' if item.kind in ('apply_update', 'apply_insert', 'applied_delete') else '') }}">{{ item.kind_label }}</span>
+              <div class="small muted">{{ item.reason }}</div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel-body tight" style="border-top:1px solid var(--line)">
+      <h3 style="margin:0 0 8px">水位线推进轨迹</h3>
+      <p class="small muted" style="margin:0">
+        每处理 10 条事件记录一次前缀水位线（min of 每键最大 ts）。迟到事件 ts 更旧，
+        因此不会把水位线往前推，只会让推进出现平台期。
+      </p>
+    </div>
+    <div class="panel-body tight">
+      <div class="split" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+        {% for table, points in result.trajectory.items() %}
+        <div>
+          <h3 style="margin:0 0 6px">{{ result.tables[table].label }}</h3>
+          <div class="table-wrap auto">
+            <table class="dense">
+              <thead><tr><th class="num">已处理</th><th>水位线</th><th class="num">未闭合</th><th class="num">已闭合</th></tr></thead>
+              <tbody>
+                {% for point in points %}
+                <tr>
+                  <td class="num">{{ point.events }}</td>
+                  <td class="small mono nowrap">{{ point.watermark }}</td>
+                  <td class="num">{{ point.open_keys }}</td>
+                  <td class="num">{{ point.closed_keys }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="panel-body tight" style="border-top:1px solid var(--line)">
+      <p class="small muted" style="margin:0">
+        水位线由「最慢的键」决定：{{ summary.open_keys }} 个键的最大 ts 高于水位线，
+        其余 {{ result.watermark.closed_keys }} 个键已闭合。持有水位线的键（laggard）：
+        {% for mark in result.watermark.per_table.values() %}
+          {% for key in mark.laggard_keys[:2] %}<code>{{ key.pk }}</code>（max ts {{ key.max_ts }}）{% if not loop.last %}、{% endif %}{% endfor %}
+          {% if not loop.last %} · {% endif %}
+        {% endfor %}
+      </p>
+    </div>
+  </div>
+
+  <div id="tab-gate" class="tab-panel" hidden>
+    <div class="panel-body tight">
+      <h3 style="margin:0 0 8px">Schema 门禁逐条结论（{{ result.gate.findings|length }} 条）</h3>
+      <p class="small" style="margin:0 0 4px">
+        <strong>门禁：</strong>{{ result.gate.counts.blocked }} 条阻断、{{ result.gate.counts.compatible_with_backfill }} 条需回填、
+        {{ result.gate.counts.compatible }} 条可放行，逐条理由见下表。
+      </p>
+      <p class="small muted" style="margin:0">
+        对比基线 v{{ result.gate.base_version }} → 目标 v{{ result.gate.target_version }}；
+        结论分布：可放行 {{ result.gate.counts.compatible }} · 放行+回填 {{ result.gate.counts.compatible_with_backfill }} ·
+        阻断 {{ result.gate.counts.blocked }}。
+        {% if result.gate.skipped_tables %}未覆盖的表：{{ result.gate.skipped_tables|join(', ') }}。{% endif %}
+      </p>
+    </div>
+    <div class="table-wrap roomy">
+      <table class="dense">
+        <thead><tr><th>表</th><th>列</th><th>变更</th><th>结论</th><th>位置</th><th>理由</th></tr></thead>
+        <tbody>
+          {% for finding in result.gate.findings %}
+          <tr>
+            <td class="nowrap">{{ finding.table }}</td>
+            <td class="mono">{{ finding.column }}</td>
+            <td class="small">{{ change_labels.get(finding.change, finding.change) }}</td>
+            <td>
+              <span class="tag {{ 'err' if finding.verdict == 'blocked' else ('warn' if finding.verdict == 'compatible_with_backfill' else 'ok') }}">
+                {{ verdict_labels.get(finding.verdict, finding.verdict) }}
+              </span>
+            </td>
+            <td class="small muted">{{ finding.position }}</td>
+            <td class="small">{{ finding.reason }}
+              {% if finding.before or finding.after %}
+              <div class="small muted mono">{{ finding.before or '—' }} → {{ finding.after or '—' }}</div>
+              {% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="6" class="muted">所选版本与基线一致，没有结构变更。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="tab-log" class="tab-panel" hidden>
+    <div class="panel-body tight">
+      <h3 style="margin:0 0 8px">变更日志（{{ result.changelog|length }} 条事件级结论）</h3>
+      <p class="small muted" style="margin:0">
+        每条都带表名 + 文件行号 + 键 + 版本，可回到 <code>sample_data/events/*.jsonl</code> 逐行核对；
+        按结论筛选与搜索在 <a href="/review?run_id={{ run.run_id }}">复核页</a>。
+      </p>
+    </div>
+    <div class="table-wrap roomy">
+      <table class="dense">
+        <thead>
+          <tr><th class="num">#</th><th>表</th><th>归档行号</th><th>键</th><th class="num">版本</th>
+            <th>op</th><th>事件 ts</th><th>迟到</th><th>结论</th><th>依据</th></tr>
+        </thead>
+        <tbody>
+          {% for entry in result.changelog %}
+          <tr class="{{ 'row-conflict' if entry.kind == 'conflict' else '' }}{{ ' row-late' if entry.late else '' }}">
+            <td class="num small muted">{{ entry.seq }}</td>
+            <td class="small nowrap">{{ entry.table }}</td>
+            <td class="mono small nowrap">第 {{ entry.line_no }} 行</td>
+            <td class="mono small">{{ entry.pk }}</td>
+            <td class="num">v{{ entry.version }}</td>
+            <td class="small">{{ op_labels.get(entry.op, entry.op) }}</td>
+            <td class="small mono nowrap">{{ entry.ts }}</td>
+            <td>{% if entry.late %}<span class="tag warn">迟到</span>{% else %}<span class="muted small">—</span>{% endif %}</td>
+            <td class="small">
+              <span class="tag {{ 'err' if entry.kind == 'conflict' else ('warn' if entry.kind in ('ignored_after_tombstone', 'superseded', 'deduped') else 'ok') }}">{{ entry.kind_label }}</span>
+            </td>
+            <td class="small muted">{{ entry.reason }}{% if entry.diff %}（差异字段：{{ entry.diff|join('、') }}）{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel-actions" style="border-top:1px solid var(--line)">
+      <a class="btn secondary small" href="/review?run_id={{ run.run_id }}">到复核页筛选 / 搜索 / 导出</a>
+      <a class="btn secondary small" href="/api/runs/{{ run.run_id }}/snapshot">下载快照 JSON</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

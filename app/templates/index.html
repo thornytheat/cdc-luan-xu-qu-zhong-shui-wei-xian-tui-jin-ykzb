@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{% block title %}总览 · {{ app_short }}{% endblock %}
+{% block crumb %}总览{% endblock %}
+{% block meta %}<span class="dot ok"></span>服务正常 · {{ stats.table_count }} 张表 · {{ stats.total_events }} 条归档事件{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/review">复核与导出</a>
+<a class="btn small" href="/workbench">去工作台</a>
+{% endblock %}
+{% block status_left %}seed {{ meta.seed_version or '未加载' }} · seed 时间 {{ meta.seeded_at or '-' }} · 运行 {{ meta.runs }} 次 · 不依赖外网{% endblock %}
+{% block status_right %}{{ app_short }} · 五条核心规则后端真算{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">总览</h1>
+    <p class="page-sub">上游 CDC 把订单 / 客户 / 库存三库的变更逐条推过来：事件会乱序、重复、迟到，
+      偶尔还会出现「同一个版本号两种内容」的冲突。本工具把它们合并成可信的最终行、给出可复现的水位线，
+      并在放行 schema 变更前逐条评估影响。</p>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="k-label">归档事件</div>
+    <div class="k-value">{{ stats.total_events }}</div>
+    <div class="k-note">3 张表 × 60 条样例</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">数据表</div>
+    <div class="k-value">{{ stats.table_count }}</div>
+    <div class="k-note">订单 / 客户 / 库存</div>
+  </div>
+  <div class="kpi {% if stats.last_run_id %}ok{% else %}warn{% endif %}">
+    <div class="k-label">最近运行</div>
+    <div class="k-value" style="font-size:13px;font-family:var(--font-mono);letter-spacing:0">
+      {{ stats.last_run_id or '未运行' }}
+    </div>
+    <div class="k-note">{{ stats.last_run_at or '到工作台执行一次合并' }}</div>
+  </div>
+  <div class="kpi {% if stats.last_conflicts %}err{% endif %}">
+    <div class="k-label">最近运行的冲突</div>
+    <div class="k-value">{{ stats.last_conflicts }}</div>
+    <div class="k-note">同版本不同内容，需人工裁决</div>
+  </div>
+</div>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>快捷操作</h2>
+    <div class="panel-actions"><span class="tag">4 步主流程</span></div>
+  </div>
+  <div class="panel-body tight">
+    <p class="small muted" style="margin:0 0 8px">
+      样例里故意埋了 3 组同版本冲突、2 个删除墓碑、8 条迟到（含 2 条墓碑后迟到）与 1 条同内容重复，
+      跑一次就能看到全部判定路径；门禁结论逐条给理由。
+    </p>
+    <p class="small" style="margin:0">
+      <a class="btn small" href="/workbench">执行合并</a>
+      {% if recent %}<a class="btn secondary small" href="/result/{{ recent[0].run_id }}">看最近一次结果</a>{% endif %}
+      <a class="btn secondary small" href="/review">复核与导出</a>
+      <a class="btn secondary small" href="/workbench#m4">看水位线口径</a>
+    </p>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>最近运行</h2>
+    <div class="panel-actions">
+      <span class="tag">{{ meta.runs }} 次</span>
+      <a class="btn secondary small" href="/review">全部</a>
+    </div>
+  </div>
+  {% if recent %}
+  <div class="table-wrap">
+    <table class="dense">
+      <thead>
+        <tr>
+          <th>运行</th><th>时间</th><th>表</th><th>schema</th>
+          <th class="num">冲突</th><th class="num">迟到</th><th>水位线</th><th>门禁</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for run in recent %}
+        <tr>
+          <td class="nowrap"><a href="/result/{{ run.run_id }}" class="mono">{{ run.run_id }}</a></td>
+          <td class="small muted nowrap">{{ run.created_at }}</td>
+          <td class="small nowrap">{{ run.tables|join(', ') }}</td>
+          <td class="small">v{{ run.schema_version }}</td>
+          <td class="num">{{ run.summary.conflicts }}</td>
+          <td class="num">{{ run.summary.late }}</td>
+          <td class="small mono nowrap">{{ run.summary.watermark }}</td>
+          <td><span class="tag {{ 'err' if run.summary.gate_verdict == 'blocked' else ('warn' if run.summary.gate_verdict == 'compatible_with_backfill' else 'ok') }}">{{ verdict_labels.get(run.summary.gate_verdict, run.summary.gate_verdict) }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="panel-actions">
+    <a class="btn small" href="/workbench">执行合并</a>
+    {% if recent %}<a class="btn secondary small" href="/result/{{ recent[0].run_id }}">看最近一次结果</a>{% endif %}
+    <a class="btn secondary small" href="/review">复核与导出（历史运行 + 变更日志）</a>
+  </div>
+  {% else %}
+  <div class="empty">
+    <strong>还没有任何运行记录</strong>
+    到工作台勾选表、选中 schema 版本，点「执行合并」就会生成一个可回看的 run_id。
+    <div style="margin-top:10px"><a class="btn small" href="/workbench">去工作台执行合并</a></div>
+  </div>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>样例事件概览</h2>
+    <div class="panel-actions">
+      <span class="tag">{{ stats.table_count }} 张表 · 埋点是故意的</span>
+      <a class="btn secondary small" href="/api/samples">看 JSON</a>
+    </div>
+  </div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead>
+        <tr>
+          <th style="width:240px">表 / 样例文件</th><th class="num" style="width:64px">事件</th>
+          <th class="num" style="width:64px">键</th><th style="width:130px">op 分布</th>
+          <th style="width:110px">schema 版本</th><th style="width:300px">事件时间区间</th><th>埋点</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for name, item in overview.items() %}
+        <tr>
+          <td><strong>{{ item.label }}</strong>
+            <div class="mono small muted">events/{{ item.file }}</div>
+            <div class="small muted">{{ item.desc }}</div></td>
+          <td class="num">{{ item.events }}</td>
+          <td class="num">{{ item['keys'] }}</td>
+          <td class="small nowrap">
+            {% for op, n in item.ops.items() %}{{ op_labels.get(op, op) }}:{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+          </td>
+          <td class="small nowrap">
+            {% for ver, n in item.schema_versions.items() %}v{{ ver }}:{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+          </td>
+          <td class="small muted nowrap">{{ item.first_ts }} → {{ item.last_ts }}</td>
+          <td class="small">
+            {% if item.table == 'orders' %}同版本冲突 1 · 删除墓碑 1 · 迟到 3
+            {% elif item.table == 'customers' %}同版本冲突 1 · 重复上报 1 · 迟到 2
+            {% else %}同版本冲突 1 · 删除墓碑 1 · 迟到 3{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="panel-body tight">
+    <p class="small muted" style="margin:0">
+      迟到共 8 条，其中 2 条（orders / inventory 的第 58 行）同时属于「墓碑后迟到」，
+      因此它们既计入迟到数，也计入 <code>ignored_after_tombstone</code>。
+      完整业务背景、五条核心规则、演示步骤与样例埋点见下方折叠。
+    </p>
+  </div>
+</section>
+
+<details class="help">
+  <summary>业务背景、五条核心规则、演示步骤与样例埋点（展开看长说明）</summary>
+
+  <p class="small">
+    <strong>使用者：</strong>数据集成组（离线同步任务 + 变更评审）。
+    <strong>现在最痛的三件事：</strong>
+  </p>
+  <ul class="list small">
+    <li><strong>重复事件无法分辨真假。</strong>上游重发同一版本时，无法一眼看出是「同内容重投」还是「同版本被改写」，
+      前者应静默丢弃，后者必须人工裁决。</li>
+    <li><strong>迟到事件把结果改坏。</strong>乱序到达的老事件如果直接覆盖，会把已经推进的行写回旧值；
+      而删除墓碑之后的低版本插入，更是会让已删除的键「复活」。</li>
+    <li><strong>水位线说不清能不能落库。</strong>没有统一口径的 watermark，就无法判断哪些键已经闭合、
+      可以安全提交或清理墓碑。</li>
+  </ul>
+
+  <p class="small">
+    <strong>输入：</strong>每表 60 条 CDC 事件（<code>pk / version / ts / op / after / schema_version</code>），
+    外加目标表结构 v1 与变更申请 v2。
+    <strong>替代：</strong>原来靠人工比对 + 一次性脚本的「去重 / 冲突裁决 / 墓碑判定 / 水位线 / 变更放行」五段判断，
+    现在是可单测的纯函数与可下载快照。
+    <strong>输出：</strong>每表最终行与墓碑、冲突逐条依据、迟到位置、水位线与未闭合键、
+    schema 门禁结论，以及一份 JSON 快照（交给下游装载与评审存档）。
+  </p>
+
+  <h3>五条核心规则（后端真算，可单测）</h3>
+  <ol class="list small">
+    <li><strong>同键合并：</strong>同 pk 只保留最大 <code>version</code>；同版本且 <code>after</code> 完全一致 → 静默去重，不计冲突；
+      同版本但内容不同 → <code>conflict</code>，保留先到内容并列出两条事件。</li>
+    <li><strong>删除墓碑：</strong><code>op=d</code> 且版本高于后续 c/u → 键判删除；墓碑必须保留；
+      墓碑后到达的低版本 c/u 一律忽略并计入 <code>ignored_after_tombstone</code>。</li>
+    <li><strong>乱序与迟到：</strong>按到达顺序处理，<code>ts</code> 小于「当前已处理最大 ts」即为迟到；
+      迟到事件仍按版本规则参与合并，并记录表名 + 文件行号。</li>
+    <li><strong>水位线：</strong><code>watermark = min(每个键已处理事件的最大 ts)</code>，
+      水位线及以下的键视为已闭合，输出全局/分表水位线与未闭合键数。</li>
+    <li><strong>Schema 门禁：</strong>新增 nullable 列 → 可放行；新增列带默认值 → 放行 + 回填；
+      删列 / 类型收窄 / 新增非空无默认 / 可空收紧为非空 → 阻断，每条给理由与列位置。</li>
+  </ol>
+
+  <h3>演示步骤</h3>
+  <ol class="list small">
+    {% for step in steps %}<li>{{ step }}</li>{% endfor %}
+  </ol>
+
+  <h3>样例里故意埋的点（验收用）</h3>
+  <div class="table-wrap auto">
+    <table class="dense">
+      <thead><tr><th>类型</th><th class="num">条数</th><th>说明</th></tr></thead>
+      <tbody>
+        {% for name, count, desc in embedded %}
+        <tr><td class="nowrap">{{ name }}</td><td class="num">{{ count }}</td><td class="small muted">{{ desc }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <h3>目标表结构变更申请 v1 → v2</h3>
+  {% for item in changes %}
+  <div class="change-block">
+    <div class="change-head"><strong>{{ item.label }}</strong>
+      <span class="tag">{{ item.columns_v1|length }} 列 → {{ item.columns_v2|length }} 列</span>
+    </div>
+    <ul class="list small">
+      {% for name in item.added %}<li>新增列 <code>{{ name }}</code></li>{% endfor %}
+      {% for name in item.removed %}<li>删除列 <code>{{ name }}</code></li>{% endfor %}
+      {% for chg in item.type_changed %}<li>类型变更 <code>{{ chg.name }}</code>：{{ chg.before }} → {{ chg.after }}</li>{% endfor %}
+      {% for chg in item.nullability %}<li>可空性 <code>{{ chg.name }}</code>：{{ chg.before }} → {{ chg.after }}</li>{% endfor %}
+      {% if not item.added and not item.removed and not item.type_changed and not item.nullability %}
+      <li class="muted">无结构变更</li>
+      {% endif %}
+    </ul>
+  </div>
+  {% endfor %}
+  <p class="small muted" style="margin-bottom:0">门禁结论不在首页给出：到工作台执行一次合并，结果页会逐条列出「可放行 / 放行+回填 / 阻断」及理由。</p>
+</details>
+{% endblock %}
